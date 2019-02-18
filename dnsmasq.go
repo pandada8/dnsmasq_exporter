@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 
 	"golang.org/x/sync/errgroup"
@@ -83,6 +84,16 @@ var (
 		}),
 	}
 
+	servers = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dnsmasq_server",
+		Help: "DNS queries sent and failed per upstream",
+	}, []string{
+		"server",
+		"type",
+	})
+
+	serversRegex = regexp.MustCompile(`^(.*) (\d*) (\d*)$`)
+
 	leases = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dnsmasq_leases",
 		Help: "Number of DHCP leases handed out",
@@ -93,6 +104,7 @@ func init() {
 	for _, g := range floatMetrics {
 		prometheus.MustRegister(g)
 	}
+	prometheus.MustRegister(servers)
 	prometheus.MustRegister(leases)
 }
 
@@ -141,7 +153,23 @@ func (s *server) metrics(w http.ResponseWriter, r *http.Request) {
 			}
 			switch txt.Hdr.Name {
 			case "servers.bind.":
-				// TODO: parse <server> <successes> <errors>, also with multiple upstreams
+				for _, record := range txt.Txt {
+					submatch := serversRegex.FindStringSubmatch(record)
+					if len(submatch) == 4 {
+						all, err := strconv.ParseFloat(submatch[2], 64)
+						if err != nil {
+							log.Errorf("failed to convert %s to float when handling input: %s", submatch[2], record)
+							continue
+						}
+						servers.WithLabelValues(submatch[1], "all").Set(all)
+						errorCount, err := strconv.ParseFloat(submatch[3], 64)
+						if err != nil {
+							log.Errorf("failed to convert %s to float when handling input: %s", submatch[2], record)
+							continue
+						}
+						servers.WithLabelValues(submatch[1], "error").Set(errorCount)
+					}
+				}
 			default:
 				g, ok := floatMetrics[txt.Hdr.Name]
 				if !ok {
